@@ -2,7 +2,7 @@
 
 CLI toolkit for inspecting and correcting Garmin swim FIT files: fix mislabelled lengths, drop spurious laps, and recompute all aggregates.
 
-> **Vibe-coded:** This project was built with AI assistance (Claude Code). The code works, but don't expect it to follow every Go convention perfectly.
+> **Vibe-coded:** This project was built with AI assistance (Claude Code). There are no guarantees about correctness — use at your own risk. Always keep your original FIT files as backups.
 
 ## Motivation
 
