@@ -109,7 +109,7 @@ func compareCmd() *cobra.Command {
 					case inA:
 						compareMesgs(lengthsA[firstA+j].ToMesg(nil), proto.Message{}, fileA, fileB)
 					case inB:
-						compareMesgs(lengthsB[firstB+j].ToMesg(nil), proto.Message{}, fileB, fileA)
+						compareMesgs(proto.Message{}, lengthsB[firstB+j].ToMesg(nil), fileA, fileB)
 					}
 					fmt.Println()
 				}
@@ -119,13 +119,13 @@ func compareCmd() *cobra.Command {
 			for i, lapB := range lapsB {
 				if !lapAStartTimes[lapB.StartTime.Unix()] {
 					fmt.Printf("=== lap #%d (only in %s) ===\n", i, fileB)
-					compareMesgs(lapB.ToMesg(nil), proto.Message{}, fileB, fileA)
+					compareMesgs(proto.Message{}, lapB.ToMesg(nil), fileA, fileB)
 					fmt.Println()
 					firstB := int(lapB.FirstLengthIndex)
 					lastB := min(firstB+int(lapB.NumLengths), len(lengthsB))
 					for j := firstB; j < lastB; j++ {
 						fmt.Printf("  --- length #%d ---\n", j)
-						compareMesgs(lengthsB[j].ToMesg(nil), proto.Message{}, fileB, fileA)
+						compareMesgs(proto.Message{}, lengthsB[j].ToMesg(nil), fileA, fileB)
 						fmt.Println()
 					}
 				}

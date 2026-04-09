@@ -75,6 +75,10 @@ func compareMesgs(orig, recomp proto.Message, labelA, labelB string) {
 	for _, f := range recomp.Fields {
 		recompByNum[f.Num] = f
 	}
+	origByNum := make(map[byte]bool)
+	for _, f := range orig.Fields {
+		origByNum[f.Num] = true
+	}
 
 	colA := max(20, len(labelA))
 	colB := max(20, len(labelB))
@@ -95,6 +99,13 @@ func compareMesgs(orig, recomp proto.Message, labelA, labelB string) {
 			marker = "*"
 		}
 		fmt.Printf(rowFmt, origField.Name, origVal, recompVal, marker)
+	}
+
+	for _, recompField := range recomp.Fields {
+		if origByNum[recompField.Num] {
+			continue
+		}
+		fmt.Printf(rowFmt, recompField.Name, "-", formatField(recompField), "*")
 	}
 }
 
