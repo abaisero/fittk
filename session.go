@@ -2,11 +2,13 @@ package main
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/muktihari/fit/profile/basetype"
 	"github.com/muktihari/fit/profile/mesgdef"
 	"github.com/muktihari/fit/profile/typedef"
 	"github.com/muktihari/fit/profile/untyped/mesgnum"
+	"github.com/muktihari/fit/proto"
 	"github.com/spf13/cobra"
 )
 
@@ -108,6 +110,31 @@ func recomputeSessionStats(
 		}
 		if oldSession.MaxHeartRate != basetype.Uint8Invalid {
 			s.MaxHeartRate = maxHR
+		}
+	}
+
+	// avg_swolf: Garmin proprietary field 80, not in the open FIT spec.
+	// Weighted average of lap avg_swolf (field 73) weighted by num_active_lengths.
+	var swolfWeightedSum, swolfTotalActive uint32
+	for _, lap := range newLaps {
+		if lap.NumActiveLengths == 0 {
+			continue
+		}
+		for _, f := range lap.UnknownFields {
+			if f.Num == 73 {
+				swolfWeightedSum += uint32(f.Value.Uint16()) * uint32(lap.NumActiveLengths)
+				swolfTotalActive += uint32(lap.NumActiveLengths)
+				break
+			}
+		}
+	}
+	if swolfTotalActive > 0 {
+		avgSwolf := uint16(math.Round(float64(swolfWeightedSum) / float64(swolfTotalActive)))
+		for i, f := range s.UnknownFields {
+			if f.Num == 80 {
+				s.UnknownFields[i].Value = proto.Uint16(avgSwolf)
+				break
+			}
 		}
 	}
 

@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/muktihari/fit/encoder"
 	"github.com/muktihari/fit/profile/basetype"
@@ -20,11 +21,13 @@ func editLengthsCmd() *cobra.Command {
 	var setIdleIndices []int
 	var setStrokeArgs []string
 	var mergeArgs []string
+	var splitIndex int
+	var ratioStr string
 	var outputPath string
 	var silent bool
 
 	cmd := &cobra.Command{
-		Use:   "edit-lengths [--set-idle <indices>] [--set-stroke <index>:<stroke> ...] | [--merge <i>,<j> ...] [--output <output.fit>] [--silent] <input.fit>",
+		Use:   "edit-lengths [--set-idle <indices>] [--set-stroke <index>:<stroke> ...] | [--merge <i>,<j> ...] | [--split <index> [--ratio a:b]] [--output <output.fit>] [--silent] <input.fit>",
 		Short: "Edit length properties and update all aggregates",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -34,12 +37,16 @@ func editLengthsCmd() *cobra.Command {
 			}
 
 			mergeMode := cmd.Flags().Changed("merge")
+			splitMode := cmd.Flags().Changed("split")
 			editMode := cmd.Flags().Changed("set-idle") || cmd.Flags().Changed("set-stroke")
 			if mergeMode && editMode {
 				return fmt.Errorf("--merge is mutually exclusive with --set-idle and --set-stroke")
 			}
-			if !mergeMode && !editMode {
-				return fmt.Errorf("at least one of --set-idle, --set-stroke, or --merge is required")
+			if splitMode && (mergeMode || editMode) {
+				return fmt.Errorf("--split is mutually exclusive with all other modes")
+			}
+			if !mergeMode && !editMode && !splitMode {
+				return fmt.Errorf("at least one of --set-idle, --set-stroke, --merge, or --split is required")
 			}
 
 			fit, err := decodeFIT(inputPath)
@@ -75,6 +82,14 @@ func editLengthsCmd() *cobra.Command {
 
 			if mergeMode {
 				return runMergeLengths(inputPath, outputPath, silent, mergeArgs, fit, oldSession, oldActivity, oldLaps, oldLengths, oldRecords)
+			}
+
+			if splitMode {
+				ratioA, ratioB, err := parseRatio(ratioStr)
+				if err != nil {
+					return fmt.Errorf("--ratio: %w", err)
+				}
+				return runSplitLength(inputPath, outputPath, silent, splitIndex, ratioA, ratioB, fit, oldSession, oldActivity, oldLaps, oldLengths, oldRecords)
 			}
 
 			// --- set-idle / set-stroke path ---
@@ -234,6 +249,8 @@ func editLengthsCmd() *cobra.Command {
 	cmd.Flags().IntSliceVar(&setIdleIndices, "set-idle", nil, "length indices to reclassify as idle")
 	cmd.Flags().StringArrayVar(&setStrokeArgs, "set-stroke", nil, "set stroke type: index:stroke (repeatable)")
 	cmd.Flags().StringArrayVar(&mergeArgs, "merge", nil, "merge adjacent lengths: i,j (repeatable, mutually exclusive with --set-idle/--set-stroke)")
+	cmd.Flags().IntVar(&splitIndex, "split", 0, "split length at index into two (mutually exclusive with all other modes)")
+	cmd.Flags().StringVar(&ratioStr, "ratio", "1:1", "time split ratio for --split (e.g. 1:1 for 50/50, 2:1 for 66/33)")
 	cmd.Flags().StringVar(&outputPath, "output", "", "output file path")
 	cmd.Flags().BoolVar(&silent, "silent", false, "suppress comparison output")
 	return cmd
@@ -509,4 +526,212 @@ func mergeTwoLengths(a, b *mesgdef.Length) *mesgdef.Length {
 	}
 
 	return m
+}
+
+func parseRatio(s string) (int, int, error) {
+	parts := strings.SplitN(s, ":", 2)
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("invalid format %q (expected a:b)", s)
+	}
+	a, err := strconv.Atoi(parts[0])
+	if err != nil || a <= 0 {
+		return 0, 0, fmt.Errorf("invalid format %q: first value must be a positive integer", s)
+	}
+	b, err := strconv.Atoi(parts[1])
+	if err != nil || b <= 0 {
+		return 0, 0, fmt.Errorf("invalid format %q: second value must be a positive integer", s)
+	}
+	return a, b, nil
+}
+
+// splitTwoLengths splits orig into two lengths according to the given ratio.
+// Each half is assumed to cover equal distance (half the original), so AvgSpeed
+// is computed as: orig.AvgSpeed * orig.TotalTimerTime / (2 * half_timer).
+func splitTwoLengths(orig *mesgdef.Length, ratioA, ratioB int) (*mesgdef.Length, *mesgdef.Length) {
+	total := uint64(ratioA + ratioB)
+
+	elapsedA := uint32(uint64(orig.TotalElapsedTime) * uint64(ratioA) / total)
+	elapsedB := orig.TotalElapsedTime - elapsedA
+	timerA := uint32(uint64(orig.TotalTimerTime) * uint64(ratioA) / total)
+	timerB := orig.TotalTimerTime - timerA
+
+	mesgA := orig.ToMesg(nil)
+	a := mesgdef.NewLength(&mesgA)
+	mesgB := orig.ToMesg(nil)
+	b := mesgdef.NewLength(&mesgB)
+
+	a.TotalElapsedTime = elapsedA
+	a.TotalTimerTime = timerA
+	b.TotalElapsedTime = elapsedB
+	b.TotalTimerTime = timerB
+
+	b.MessageIndex = orig.MessageIndex + 1
+
+	// Fix start_time: b starts where a ends; a keeps orig.StartTime, timestamp is unchanged on both
+	if !orig.StartTime.IsZero() {
+		b.StartTime = orig.StartTime.Add(time.Duration(elapsedA) * time.Millisecond)
+	}
+
+	if orig.LengthType == typedef.LengthTypeActive {
+		if orig.TotalStrokes != basetype.Uint16Invalid {
+			strokesA := uint16(uint64(orig.TotalStrokes) * uint64(ratioA) / total)
+			strokesB := orig.TotalStrokes - strokesA
+			a.TotalStrokes = strokesA
+			b.TotalStrokes = strokesB
+			if timerA > 0 {
+				a.AvgSwimmingCadence = uint8(uint64(strokesA) * 60000 / uint64(timerA))
+			}
+			if timerB > 0 {
+				b.AvgSwimmingCadence = uint8(uint64(strokesB) * 60000 / uint64(timerB))
+			}
+		}
+		if orig.AvgSpeed != basetype.Uint16Invalid {
+			if timerA > 0 {
+				a.AvgSpeed = uint16(uint64(orig.AvgSpeed) * uint64(orig.TotalTimerTime) / uint64(timerA))
+			}
+			if timerB > 0 {
+				b.AvgSpeed = uint16(uint64(orig.AvgSpeed) * uint64(orig.TotalTimerTime) / uint64(timerB))
+			}
+		}
+	}
+
+	if orig.TotalCalories != basetype.Uint16Invalid {
+		calA := uint16(uint64(orig.TotalCalories) * uint64(ratioA) / total)
+		b.TotalCalories = orig.TotalCalories - calA
+		a.TotalCalories = calA
+	}
+
+	return a, b
+}
+
+func runSplitLength(
+	inputPath, outputPath string,
+	silent bool,
+	splitIdx int,
+	ratioA, ratioB int,
+	fit *proto.FIT,
+	oldSession *mesgdef.Session,
+	oldActivity *mesgdef.Activity,
+	oldLaps []*mesgdef.Lap,
+	oldLengths []*mesgdef.Length,
+	oldRecords []*mesgdef.Record,
+) error {
+	if splitIdx < 0 || splitIdx >= len(oldLengths) {
+		return fmt.Errorf("length index %d out of range (0-%d)", splitIdx, len(oldLengths)-1)
+	}
+
+	orig := oldLengths[splitIdx]
+	a, b := splitTwoLengths(orig, ratioA, ratioB)
+
+	// Build new lengths with orig replaced by a, b
+	newLengths := make([]*mesgdef.Length, 0, len(oldLengths)+1)
+	for i, l := range oldLengths {
+		if i == splitIdx {
+			newLengths = append(newLengths, a, b)
+		} else {
+			newLengths = append(newLengths, l)
+		}
+	}
+
+	// Find the containing lap
+	containingLap := -1
+	for lapIdx, lap := range oldLaps {
+		first := int(lap.FirstLengthIndex)
+		last := first + int(lap.NumLengths)
+		if splitIdx >= first && splitIdx < last {
+			containingLap = lapIdx
+			break
+		}
+	}
+	if containingLap < 0 {
+		return fmt.Errorf("length %d does not belong to any lap", splitIdx)
+	}
+
+	// Build new laps
+	newLaps := make([]*mesgdef.Lap, len(oldLaps))
+	for lapIdx, lap := range oldLaps {
+		first := int(lap.FirstLengthIndex)
+		last := min(first+int(lap.NumLengths), len(oldLengths))
+		switch {
+		case lapIdx == containingLap:
+			lapOldLengths := oldLengths[first:last]
+			lapNewLengths := newLengths[first : first+int(lap.NumLengths)+1]
+			lapRecords := recordsForLap(lap, oldRecords)
+			newLaps[lapIdx] = recomputeLapStats(lap, lapOldLengths, lapRecords, lapNewLengths, lapRecords)
+		case lapIdx > containingLap:
+			mesg := lap.ToMesg(nil)
+			shifted := mesgdef.NewLap(&mesg)
+			shifted.FirstLengthIndex = uint16(first + 1)
+			newLaps[lapIdx] = shifted
+		default:
+			newLaps[lapIdx] = lap
+		}
+	}
+
+	newSession := recomputeSessionStats(oldSession, oldLaps, oldLengths, oldRecords, newLaps, newLengths, oldRecords)
+
+	var newActivity *mesgdef.Activity
+	if oldActivity != nil {
+		mesg := oldActivity.ToMesg(nil)
+		newActivity = mesgdef.NewActivity(&mesg)
+		newActivity.TotalTimerTime = newSession.TotalTimerTime
+	}
+
+	if !silent {
+		fmt.Println("=== session ===")
+		compareMesgs(oldSession.ToMesg(nil), newSession.ToMesg(nil), "original", "updated")
+		fmt.Println()
+
+		oldLap := oldLaps[containingLap]
+		fmt.Printf("=== lap #%d ===\n", containingLap)
+		compareMesgs(oldLap.ToMesg(nil), newLaps[containingLap].ToMesg(nil), "original", "updated")
+		fmt.Println()
+
+		fmt.Printf("  --- length #%d (split) ---\n", splitIdx)
+		compareMesgs(orig.ToMesg(nil), a.ToMesg(nil), "original", "first half")
+		fmt.Println()
+
+		fmt.Printf("  --- length #%d (inserted) ---\n", splitIdx+1)
+		compareMesgs(orig.ToMesg(nil), b.ToMesg(nil), "original", "second half")
+		fmt.Println()
+	}
+
+	if outputPath == "" {
+		return nil
+	}
+
+	lengthIdx := 0
+	lapIdx := 0
+	var out []proto.Message
+	for _, mesg := range fit.Messages {
+		switch mesg.Num {
+		case mesgnum.Length:
+			if lengthIdx == splitIdx {
+				out = append(out, a.ToMesg(nil), b.ToMesg(nil))
+			} else if lengthIdx > splitIdx {
+				l := mesgdef.NewLength(&mesg)
+				l.MessageIndex++
+				out = append(out, l.ToMesg(nil))
+			} else {
+				out = append(out, mesg)
+			}
+			lengthIdx++
+		case mesgnum.Lap:
+			out = append(out, newLaps[lapIdx].ToMesg(nil))
+			lapIdx++
+		case mesgnum.Session:
+			out = append(out, newSession.ToMesg(nil))
+		case mesgnum.Activity:
+			if newActivity != nil {
+				out = append(out, newActivity.ToMesg(nil))
+			} else {
+				out = append(out, mesg)
+			}
+		default:
+			out = append(out, mesg)
+		}
+	}
+
+	fit.Messages = out
+	return writeFIT(fit, outputPath)
 }

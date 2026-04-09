@@ -2,12 +2,14 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/muktihari/fit/profile/basetype"
 	"github.com/muktihari/fit/profile/mesgdef"
 	"github.com/muktihari/fit/profile/typedef"
 	"github.com/muktihari/fit/profile/untyped/mesgnum"
+	"github.com/muktihari/fit/proto"
 	"github.com/spf13/cobra"
 )
 
@@ -128,6 +130,18 @@ func recomputeLapStats(
 		}
 		if oldLap.MaxHeartRate != basetype.Uint8Invalid {
 			l.MaxHeartRate = maxHR
+		}
+	}
+
+	// avg_swolf: Garmin proprietary field 73, not in the open FIT spec.
+	// Formula: (total_timer_s + total_strokes) / num_active_lengths
+	if numActiveLengths > 0 && totalCycles != basetype.Uint32Invalid {
+		avgSwolf := uint16(math.Round(float64(totalTimer/1000+totalCycles) / float64(numActiveLengths)))
+		for i, f := range l.UnknownFields {
+			if f.Num == 73 {
+				l.UnknownFields[i].Value = proto.Uint16(avgSwolf)
+				break
+			}
 		}
 	}
 
