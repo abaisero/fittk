@@ -87,7 +87,7 @@ func recomputeSessionStats(
 	if activeTimer > 0 {
 		// AvgSpeed (m/s, scale 1000) = (TotalDistance/100) / (activeTimer/1000) * 1000
 		// = TotalDistance * 10000 / activeTimer
-		avgSpeed := uint16(uint64(totalDistance) * 10000 / uint64(activeTimer))
+		avgSpeed := uint16(math.Round(float64(totalDistance) * 10000 / float64(activeTimer)))
 		s.AvgSpeed = ifValid(oldSession.AvgSpeed, avgSpeed)
 		s.EnhancedAvgSpeed = ifValid(oldSession.EnhancedAvgSpeed, uint32(avgSpeed))
 	}

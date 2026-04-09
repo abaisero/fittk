@@ -107,7 +107,7 @@ func recomputeLapStats(
 	l.EnhancedMaxSpeed = ifValid(oldLap.EnhancedMaxSpeed, uint32(maxSpeed))
 
 	if activeTimer > 0 {
-		avgSpeed := uint16(uint64(l.TotalDistance) * 10000 / uint64(activeTimer))
+		avgSpeed := uint16(math.Round(float64(l.TotalDistance) * 10000 / float64(activeTimer)))
 		l.AvgSpeed = ifValid(oldLap.AvgSpeed, avgSpeed)
 		l.EnhancedAvgSpeed = ifValid(oldLap.EnhancedAvgSpeed, uint32(avgSpeed))
 	}
