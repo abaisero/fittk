@@ -126,7 +126,7 @@ func recomputeLapStats(
 	}
 	if hrCount > 0 {
 		if oldLap.AvgHeartRate != basetype.Uint8Invalid {
-			l.AvgHeartRate = uint8((hrSum + hrCount/2) / hrCount)
+			l.AvgHeartRate = uint8(math.Round(float64(hrSum) / float64(hrCount)))
 		}
 		if oldLap.MaxHeartRate != basetype.Uint8Invalid {
 			l.MaxHeartRate = maxHR
