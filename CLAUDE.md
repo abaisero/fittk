@@ -19,7 +19,7 @@ This is a Go CLI tool for inspecting and editing Garmin swim FIT files. Single `
 - `cmd_dump.go` — `dump`: prints all messages and fields with human-readable formatting; also contains `compareMesgs`
 - `cmd_compare.go` — `compare`: side-by-side field diff of two FIT files (session, laps, lengths)
 - `cmd_drop_laps.go` — `drop-laps`: drops trailing laps by index, removes all associated messages (records, events, device info), recomputes session/activity aggregates
-- `cmd_edit_lengths.go` — `edit-lengths`: edits lengths via `--set-idle`, `--set-stroke`, or `--merge` (mutually exclusive); recomputes affected laps and session
+- `cmd_edit_lengths.go` — `edit-lengths`: edits lengths via `--set-idle`/`--set-stroke`/`--set-stroke-count`, `--merge`, or `--split` (mutually exclusive groups); recomputes affected laps and session. `--set-stroke-count` sets a length's `total_strokes` (active lengths only) and recomputes its `avg_swimming_cadence`.
 - `lap.go` — `recomputeLapStats`, `recordsForLap`, `verify-laps` command
 - `session.go` — `recomputeSessionStats`, `verify-session` command
 

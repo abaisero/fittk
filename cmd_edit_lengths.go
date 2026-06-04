@@ -20,6 +20,7 @@ import (
 func editLengthsCmd() *cobra.Command {
 	var setIdleIndices []int
 	var setStrokeArgs []string
+	var setStrokeCountArgs []string
 	var mergeArgs []string
 	var splitIndex int
 	var ratioStr string
@@ -27,7 +28,7 @@ func editLengthsCmd() *cobra.Command {
 	var silent bool
 
 	cmd := &cobra.Command{
-		Use:   "edit-lengths [--set-idle <indices>] [--set-stroke <index>:<stroke> ...] | [--merge <i>,<j> ...] | [--split <index> [--ratio a:b]] [--output <output.fit>] [--silent] <input.fit>",
+		Use:   "edit-lengths [--set-idle <indices>] [--set-stroke <index>:<stroke> ...] [--set-stroke-count <index>:<count> ...] | [--merge <i>,<j> ...] | [--split <index> [--ratio a:b]] [--output <output.fit>] [--silent] <input.fit>",
 		Short: "Edit length properties and update all aggregates",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -38,15 +39,15 @@ func editLengthsCmd() *cobra.Command {
 
 			mergeMode := cmd.Flags().Changed("merge")
 			splitMode := cmd.Flags().Changed("split")
-			editMode := cmd.Flags().Changed("set-idle") || cmd.Flags().Changed("set-stroke")
+			editMode := cmd.Flags().Changed("set-idle") || cmd.Flags().Changed("set-stroke") || cmd.Flags().Changed("set-stroke-count")
 			if mergeMode && editMode {
-				return fmt.Errorf("--merge is mutually exclusive with --set-idle and --set-stroke")
+				return fmt.Errorf("--merge is mutually exclusive with --set-idle, --set-stroke, and --set-stroke-count")
 			}
 			if splitMode && (mergeMode || editMode) {
 				return fmt.Errorf("--split is mutually exclusive with all other modes")
 			}
 			if !mergeMode && !editMode && !splitMode {
-				return fmt.Errorf("at least one of --set-idle, --set-stroke, --merge, or --split is required")
+				return fmt.Errorf("at least one of --set-idle, --set-stroke, --set-stroke-count, --merge, or --split is required")
 			}
 
 			fit, err := decodeFIT(inputPath)
@@ -112,6 +113,24 @@ func editLengthsCmd() *cobra.Command {
 				setStroke[idx] = stroke
 			}
 
+			// Parse --set-stroke-count args
+			setStrokeCount := make(map[int]uint16)
+			for _, s := range setStrokeCountArgs {
+				parts := strings.SplitN(s, ":", 2)
+				if len(parts) != 2 {
+					return fmt.Errorf("invalid --set-stroke-count format %q (expected index:count)", s)
+				}
+				idx, err := strconv.Atoi(parts[0])
+				if err != nil {
+					return fmt.Errorf("invalid index in --set-stroke-count %q: %w", s, err)
+				}
+				count, err := strconv.Atoi(parts[1])
+				if err != nil || count < 0 || count >= int(basetype.Uint16Invalid) {
+					return fmt.Errorf("invalid count in --set-stroke-count %q (expected 0-%d)", s, basetype.Uint16Invalid-1)
+				}
+				setStrokeCount[idx] = uint16(count)
+			}
+
 			// Validate all indices
 			setIdleSet := make(map[int]bool)
 			for _, i := range setIdleIndices {
@@ -123,6 +142,19 @@ func editLengthsCmd() *cobra.Command {
 			for idx := range setStroke {
 				if idx < 0 || idx >= len(oldLengths) {
 					return fmt.Errorf("length index %d out of range (0-%d)", idx, len(oldLengths)-1)
+				}
+			}
+			for idx := range setStrokeCount {
+				if idx < 0 || idx >= len(oldLengths) {
+					return fmt.Errorf("length index %d out of range (0-%d)", idx, len(oldLengths)-1)
+				}
+				// Setting a stroke count only makes sense for active lengths, and
+				// not when the same length is being reclassified as idle.
+				if setIdleSet[idx] {
+					return fmt.Errorf("length %d: cannot --set-stroke-count and --set-idle on the same length", idx)
+				}
+				if _, ok := setStroke[idx]; !ok && oldLengths[idx].LengthType != typedef.LengthTypeActive {
+					return fmt.Errorf("length %d is not active; --set-stroke-count only applies to active lengths", idx)
 				}
 			}
 
@@ -138,6 +170,9 @@ func editLengthsCmd() *cobra.Command {
 			for i, stroke := range setStroke {
 				newLengths[i].SwimStroke = stroke
 				newLengths[i].LengthType = typedef.LengthTypeActive
+			}
+			for i, count := range setStrokeCount {
+				setLengthStrokeCount(newLengths[i], count)
 			}
 
 			// Map each length index to its lap index
@@ -156,6 +191,9 @@ func editLengthsCmd() *cobra.Command {
 				affectedLaps[lengthToLap[i]] = true
 			}
 			for i := range setStroke {
+				affectedLaps[lengthToLap[i]] = true
+			}
+			for i := range setStrokeCount {
 				affectedLaps[lengthToLap[i]] = true
 			}
 
@@ -203,7 +241,8 @@ func editLengthsCmd() *cobra.Command {
 					fmt.Println()
 
 					for j := first; j < last; j++ {
-						if !setIdleSet[j] && setStroke[j] == 0 {
+						_, strokeCountSet := setStrokeCount[j]
+						if !setIdleSet[j] && setStroke[j] == 0 && !strokeCountSet {
 							continue
 						}
 						fmt.Printf("  --- length #%d ---\n", j)
@@ -248,7 +287,8 @@ func editLengthsCmd() *cobra.Command {
 
 	cmd.Flags().IntSliceVar(&setIdleIndices, "set-idle", nil, "length indices to reclassify as idle")
 	cmd.Flags().StringArrayVar(&setStrokeArgs, "set-stroke", nil, "set stroke type: index:stroke (repeatable)")
-	cmd.Flags().StringArrayVar(&mergeArgs, "merge", nil, "merge adjacent lengths: i,j (repeatable, mutually exclusive with --set-idle/--set-stroke)")
+	cmd.Flags().StringArrayVar(&setStrokeCountArgs, "set-stroke-count", nil, "set total stroke count: index:count (repeatable)")
+	cmd.Flags().StringArrayVar(&mergeArgs, "merge", nil, "merge adjacent lengths: i,j (repeatable, mutually exclusive with --set-idle/--set-stroke/--set-stroke-count)")
 	cmd.Flags().IntVar(&splitIndex, "split", 0, "split length at index into two (mutually exclusive with all other modes)")
 	cmd.Flags().StringVar(&ratioStr, "ratio", "1:1", "time split ratio for --split (e.g. 1:1 for 50/50, 2:1 for 66/33)")
 	cmd.Flags().StringVar(&outputPath, "output", "", "output file path")
@@ -502,6 +542,16 @@ func setLengthIdle(l *mesgdef.Length) {
 	l.TotalStrokes = basetype.Uint16Invalid
 	l.AvgSpeed = basetype.Uint16Invalid
 	l.AvgSwimmingCadence = basetype.Uint8Invalid
+}
+
+// setLengthStrokeCount sets the total stroke count on an active length and
+// recomputes the derived AvgSwimmingCadence (strokes per minute). The cadence is
+// only updated if it was already recorded, to avoid fabricating a value.
+func setLengthStrokeCount(l *mesgdef.Length, count uint16) {
+	l.TotalStrokes = count
+	if l.AvgSwimmingCadence != basetype.Uint8Invalid && l.TotalTimerTime > 0 {
+		l.AvgSwimmingCadence = uint8(uint64(count) * 60000 / uint64(l.TotalTimerTime))
+	}
 }
 
 func mergeTwoLengths(a, b *mesgdef.Length) *mesgdef.Length {
