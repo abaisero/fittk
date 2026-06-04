@@ -22,6 +22,7 @@ func editLengthsCmd() *cobra.Command {
 	var setStrokeArgs []string
 	var setStrokeCountArgs []string
 	var mergeArgs []string
+	var mergeForceArgs []string
 	var splitIndex int
 	var ratioStr string
 	var outputPath string
@@ -37,17 +38,17 @@ func editLengthsCmd() *cobra.Command {
 				return fmt.Errorf("--output must be different from input")
 			}
 
-			mergeMode := cmd.Flags().Changed("merge")
+			mergeMode := cmd.Flags().Changed("merge") || cmd.Flags().Changed("merge-force")
 			splitMode := cmd.Flags().Changed("split")
 			editMode := cmd.Flags().Changed("set-idle") || cmd.Flags().Changed("set-stroke") || cmd.Flags().Changed("set-stroke-count")
 			if mergeMode && editMode {
-				return fmt.Errorf("--merge is mutually exclusive with --set-idle, --set-stroke, and --set-stroke-count")
+				return fmt.Errorf("--merge/--merge-force is mutually exclusive with --set-idle, --set-stroke, and --set-stroke-count")
 			}
 			if splitMode && (mergeMode || editMode) {
 				return fmt.Errorf("--split is mutually exclusive with all other modes")
 			}
 			if !mergeMode && !editMode && !splitMode {
-				return fmt.Errorf("at least one of --set-idle, --set-stroke, --set-stroke-count, --merge, or --split is required")
+				return fmt.Errorf("at least one of --set-idle, --set-stroke, --set-stroke-count, --merge, --merge-force, or --split is required")
 			}
 
 			fit, err := decodeFIT(inputPath)
@@ -82,7 +83,7 @@ func editLengthsCmd() *cobra.Command {
 			}
 
 			if mergeMode {
-				return runMergeLengths(inputPath, outputPath, silent, mergeArgs, fit, oldSession, oldActivity, oldLaps, oldLengths, oldRecords)
+				return runMergeLengths(inputPath, outputPath, silent, mergeArgs, mergeForceArgs, fit, oldSession, oldActivity, oldLaps, oldLengths, oldRecords)
 			}
 
 			if splitMode {
@@ -289,6 +290,7 @@ func editLengthsCmd() *cobra.Command {
 	cmd.Flags().StringArrayVar(&setStrokeArgs, "set-stroke", nil, "set stroke type: index:stroke (repeatable)")
 	cmd.Flags().StringArrayVar(&setStrokeCountArgs, "set-stroke-count", nil, "set total stroke count: index:count (repeatable)")
 	cmd.Flags().StringArrayVar(&mergeArgs, "merge", nil, "merge adjacent lengths: i,j (repeatable, mutually exclusive with --set-idle/--set-stroke/--set-stroke-count)")
+	cmd.Flags().StringArrayVar(&mergeForceArgs, "merge-force", nil, "like --merge but skip same-lap/type/stroke checks (e.g. to merge orphaned idle lengths)")
 	cmd.Flags().IntVar(&splitIndex, "split", 0, "split length at index into two (mutually exclusive with all other modes)")
 	cmd.Flags().StringVar(&ratioStr, "ratio", "1:1", "time split ratio for --split (e.g. 1:1 for 50/50, 2:1 for 66/33)")
 	cmd.Flags().StringVar(&outputPath, "output", "", "output file path")
@@ -300,6 +302,7 @@ func runMergeLengths(
 	inputPath, outputPath string,
 	silent bool,
 	mergeArgs []string,
+	mergeForceArgs []string,
 	fit *proto.FIT,
 	oldSession *mesgdef.Session,
 	oldActivity *mesgdef.Activity,
@@ -307,25 +310,42 @@ func runMergeLengths(
 	oldLengths []*mesgdef.Length,
 	oldRecords []*mesgdef.Record,
 ) error {
-	type pair struct{ i, j int }
+	type pair struct {
+		i, j  int
+		force bool
+	}
 	var pairs []pair
-	for _, s := range mergeArgs {
-		parts := strings.SplitN(s, ",", 2)
-		if len(parts) != 2 {
-			return fmt.Errorf("invalid --merge %q (expected i,j)", s)
+	parse := func(args []string, force bool, flag string) error {
+		for _, s := range args {
+			parts := strings.SplitN(s, ",", 2)
+			if len(parts) != 2 {
+				return fmt.Errorf("invalid %s %q (expected i,j)", flag, s)
+			}
+			p := pair{force: force}
+			if _, err := fmt.Sscan(parts[0], &p.i); err != nil {
+				return fmt.Errorf("invalid %s %q: %w", flag, s, err)
+			}
+			if _, err := fmt.Sscan(parts[1], &p.j); err != nil {
+				return fmt.Errorf("invalid %s %q: %w", flag, s, err)
+			}
+			pairs = append(pairs, p)
 		}
-		var p pair
-		if _, err := fmt.Sscan(parts[0], &p.i); err != nil {
-			return fmt.Errorf("invalid --merge %q: %w", s, err)
-		}
-		if _, err := fmt.Sscan(parts[1], &p.j); err != nil {
-			return fmt.Errorf("invalid --merge %q: %w", s, err)
-		}
-		pairs = append(pairs, p)
+		return nil
+	}
+	if err := parse(mergeArgs, false, "--merge"); err != nil {
+		return err
+	}
+	if err := parse(mergeForceArgs, true, "--merge-force"); err != nil {
+		return err
 	}
 
-	// Validate all pairs before doing anything
+	// Validate all pairs before doing anything. The structural checks (adjacency,
+	// range, no shared index) always apply; --merge-force only waives the policy
+	// checks (same lap / same type / same stroke). A forced merge keeps the lower
+	// (kept) length's lap membership and drops the upper length from whichever lap
+	// owned it; merging orphaned idle lengths therefore stays orphaned.
 	seenPairs := make(map[[2]int]bool)
+	usedIdx := make(map[int]bool)
 	for _, p := range pairs {
 		key := [2]int{p.i, p.j}
 		if seenPairs[key] {
@@ -337,6 +357,14 @@ func runMergeLengths(
 		}
 		if p.i < 0 || p.j >= len(oldLengths) {
 			return fmt.Errorf("merge index %d out of range (valid: 0-%d)", p.i, len(oldLengths)-2)
+		}
+		if usedIdx[p.i] || usedIdx[p.j] {
+			return fmt.Errorf("length %d or %d is referenced in more than one merge; run them in separate invocations", p.i, p.j)
+		}
+		usedIdx[p.i] = true
+		usedIdx[p.j] = true
+		if p.force {
+			continue
 		}
 		a, b := oldLengths[p.i], oldLengths[p.j]
 		lapOfA, lapOfB := -1, -1
@@ -351,13 +379,13 @@ func runMergeLengths(
 			}
 		}
 		if lapOfA != lapOfB || lapOfA < 0 {
-			return fmt.Errorf("lengths %d and %d must belong to the same lap", p.i, p.j)
+			return fmt.Errorf("lengths %d and %d must belong to the same lap (use --merge-force to override)", p.i, p.j)
 		}
 		if a.LengthType != b.LengthType {
-			return fmt.Errorf("lengths %d and %d have different types (%v vs %v)", p.i, p.j, a.LengthType, b.LengthType)
+			return fmt.Errorf("lengths %d and %d have different types (%v vs %v) (use --merge-force to override)", p.i, p.j, a.LengthType, b.LengthType)
 		}
 		if a.LengthType == typedef.LengthTypeActive && a.SwimStroke != b.SwimStroke {
-			return fmt.Errorf("lengths %d and %d have different strokes (%v vs %v)", p.i, p.j, a.SwimStroke, b.SwimStroke)
+			return fmt.Errorf("lengths %d and %d have different strokes (%v vs %v) (use --merge-force to override)", p.i, p.j, a.SwimStroke, b.SwimStroke)
 		}
 	}
 
@@ -408,6 +436,14 @@ func runMergeLengths(
 			// lengths removed in earlier laps so it still points at this lap's
 			// first length.
 			recomputed.FirstLengthIndex = uint16(newFirst)
+			// A length merge relocates time, it never deletes it. recomputeLapStats
+			// subtracts a removed length's duration from the lap, which is correct
+			// only when both merged lengths stay in this lap. For a --merge-force
+			// that moves a counted length out (into an orphan or another lap), that
+			// would silently shrink the lap and lose activity time, so preserve the
+			// lap's original duration.
+			recomputed.TotalElapsedTime = lap.TotalElapsedTime
+			recomputed.TotalTimerTime = lap.TotalTimerTime
 			newLaps[lapIdx] = recomputed
 		case shiftBefore > 0:
 			mesg := lap.ToMesg(nil)

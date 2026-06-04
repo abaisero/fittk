@@ -59,11 +59,16 @@ func compareCmd() *cobra.Command {
 				return fmt.Errorf("%s: no session message found", args[1])
 			}
 
-			// Index laps in B by StartTime for matching
-			lapBByStartTime := make(map[int64]*mesgdef.Lap)
-			for _, lap := range lapsB {
-				lapBByStartTime[lap.StartTime.Unix()] = lap
+			// Match laps between files by start time. Multiple laps can share the
+			// same start second (e.g. a zero-duration lap), so queue B's laps per
+			// start time and pair them FIFO — keying a plain map by start time would
+			// let a later lap clobber an earlier one and mismatch the pair.
+			lapBQueue := make(map[int64][]int)
+			for i, lap := range lapsB {
+				k := lap.StartTime.Unix()
+				lapBQueue[k] = append(lapBQueue[k], i)
 			}
+			consumedB := make([]bool, len(lapsB))
 
 			fileA, fileB := args[0], args[1]
 
@@ -71,14 +76,10 @@ func compareCmd() *cobra.Command {
 			compareMesgs(sessionA.ToMesg(nil), sessionB.ToMesg(nil), fileA, fileB)
 			fmt.Println()
 
-			lapAStartTimes := make(map[int64]bool)
-			for _, lap := range lapsA {
-				lapAStartTimes[lap.StartTime.Unix()] = true
-			}
-
 			for i, lapA := range lapsA {
-				lapB, ok := lapBByStartTime[lapA.StartTime.Unix()]
-				if !ok {
+				k := lapA.StartTime.Unix()
+				q := lapBQueue[k]
+				if len(q) == 0 {
 					fmt.Printf("=== lap #%d (only in %s) ===\n", i, fileA)
 					compareMesgs(lapA.ToMesg(nil), proto.Message{}, fileA, fileB)
 					fmt.Println()
@@ -91,6 +92,11 @@ func compareCmd() *cobra.Command {
 					}
 					continue
 				}
+				bIdx := q[0]
+				lapBQueue[k] = q[1:]
+				consumedB[bIdx] = true
+				lapB := lapsB[bIdx]
+
 				fmt.Printf("=== lap #%d ===\n", i)
 				compareMesgs(lapA.ToMesg(nil), lapB.ToMesg(nil), fileA, fileB)
 				fmt.Println()
@@ -117,17 +123,18 @@ func compareCmd() *cobra.Command {
 
 			// Laps in B not matched to any lap in A
 			for i, lapB := range lapsB {
-				if !lapAStartTimes[lapB.StartTime.Unix()] {
-					fmt.Printf("=== lap #%d (only in %s) ===\n", i, fileB)
-					compareMesgs(proto.Message{}, lapB.ToMesg(nil), fileA, fileB)
+				if consumedB[i] {
+					continue
+				}
+				fmt.Printf("=== lap #%d (only in %s) ===\n", i, fileB)
+				compareMesgs(proto.Message{}, lapB.ToMesg(nil), fileA, fileB)
+				fmt.Println()
+				firstB := int(lapB.FirstLengthIndex)
+				lastB := min(firstB+int(lapB.NumLengths), len(lengthsB))
+				for j := firstB; j < lastB; j++ {
+					fmt.Printf("  --- length #%d ---\n", j)
+					compareMesgs(proto.Message{}, lengthsB[j].ToMesg(nil), fileA, fileB)
 					fmt.Println()
-					firstB := int(lapB.FirstLengthIndex)
-					lastB := min(firstB+int(lapB.NumLengths), len(lengthsB))
-					for j := firstB; j < lastB; j++ {
-						fmt.Printf("  --- length #%d ---\n", j)
-						compareMesgs(proto.Message{}, lengthsB[j].ToMesg(nil), fileA, fileB)
-						fmt.Println()
-					}
 				}
 			}
 
