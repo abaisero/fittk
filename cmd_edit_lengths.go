@@ -403,7 +403,12 @@ func runMergeLengths(
 			newFirst := first - shiftBefore
 			lapNewLengths := newLengths[newFirst : newFirst+int(lap.NumLengths)-removedInLap]
 			lapRecords := recordsForLap(lap, oldRecords)
-			newLaps[lapIdx] = recomputeLapStats(lap, oldLengths[first:last], lapRecords, lapNewLengths, lapRecords)
+			recomputed := recomputeLapStats(lap, oldLengths[first:last], lapRecords, lapNewLengths, lapRecords)
+			// recomputeLapStats preserves FirstLengthIndex; shift it for any
+			// lengths removed in earlier laps so it still points at this lap's
+			// first length.
+			recomputed.FirstLengthIndex = uint16(newFirst)
+			newLaps[lapIdx] = recomputed
 		case shiftBefore > 0:
 			mesg := lap.ToMesg(nil)
 			shifted := mesgdef.NewLap(&mesg)
@@ -471,6 +476,7 @@ func runMergeLengths(
 	var out []proto.Message
 	lapIdx := 0
 	lengthIdx := 0
+	removedBefore := 0
 	for _, mesg := range fit.Messages {
 		switch mesg.Num {
 		case mesgnum.Lap:
@@ -478,13 +484,20 @@ func runMergeLengths(
 			lapIdx++
 		case mesgnum.Length:
 			if removedIdx[lengthIdx] {
+				removedBefore++
 				lengthIdx++
 				continue
 			}
+			// Renumber MessageIndex to stay contiguous after removals, keeping it
+			// consistent with the (position-based) lap first_length_index updates.
+			newMsgIdx := typedef.MessageIndex(lengthIdx - removedBefore)
 			if m, ok := mergedByIdx[lengthIdx]; ok {
+				m.MessageIndex = newMsgIdx
 				out = append(out, m.ToMesg(nil))
 			} else {
-				out = append(out, mesg)
+				l := mesgdef.NewLength(&mesg)
+				l.MessageIndex = newMsgIdx
+				out = append(out, l.ToMesg(nil))
 			}
 			lengthIdx++
 		case mesgnum.Session:

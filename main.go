@@ -20,7 +20,7 @@ func main() {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.AddCommand(dumpCmd(), showLapsCmd(), dropLapsCmd(), editLengthsCmd(), verifySessionCmd(), verifyLapCmd(), compareCmd())
+	root.AddCommand(dumpCmd(), showLapsCmd(), dropLapsCmd(), editLengthsCmd(), mergeLapsCmd(), verifySessionCmd(), verifyLapCmd(), compareCmd())
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
